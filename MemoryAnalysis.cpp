@@ -3,104 +3,21 @@
  *      March 7 2020           *
  *******************************/
 
-/*
- * An overload of overload of global operator new
- * and global operator delete to explicitly check
- * for memory leaks and freeing invalid memory.
- * This uses boost/stacktrace.hpp to point out
- * exactly where you messed up. It is just for
- * educational and possibly debugging purposes:
- */
+ /*
+  * An overload of overload of global operator new
+  * and global operator delete to explicitly check
+  * for memory leaks and freeing invalid memory.
+  * This uses boost/stacktrace.hpp to point out
+  * exactly where you messed up. It is just for
+  * educational and possibly debugging purposes:
+  */
 
-#include <boost/stacktrace.hpp> // boost::stacktrace
-#include <cstdio>               // fprintf
-#include <type_traits>          // decay_t
-#include <unordered_map>        // unordered_map
-#include <utility>              // move
 
- // An allocator that uses malloc as its memory source
-#include "MallocAllocator.h"
 
-// Hash map that uses malloc to avoid infinite recursion in operator new
-template<typename Key, typename T>
-using MallocHashMap =
-std::unordered_map<Key,
-        T,
-        std::hash<Key>,
-        std::equal_to<Key>,
-        MallocAllocator<std::pair<const Key, T>>>;
 
-// Stack trace that uses malloc to avoid infinite recursion in operator new
-using MallocStackTrace = boost::stacktrace::basic_stacktrace<
-        MallocAllocator<boost::stacktrace::frame>>;
+#include "MemoryAnalysis.h"
 
-// Memory allocation info with, address, size, stackTrace
-struct MemoryAllocation
-{
-        // the constructor is so that we can use emplace in unordered_map
-        MemoryAllocation(void const* const address_,
-                std::size_t const size_,
-                MallocStackTrace trace_) noexcept
-                : address{ address_ }
-                , size{ size_ }
-                , stackTrace{ std::move(trace_) }
-        {}
-        void const* address;
-        std::size_t size;
-        MallocStackTrace stackTrace;
-};
 
-// new/delete -> Object vs new[]/delete[] -> Array
-enum class AllocationType
-{
-        Object,
-        Array,
-};
-
-// returns AllocationType::Object for AllocationType::Array and
-// AllocationType::Array for AllocationType::Object
-static constexpr AllocationType
-otherAllocType(AllocationType const at) noexcept
-{
-        switch (at) {
-        case AllocationType::Object:
-                return AllocationType::Array;
-        case AllocationType::Array:
-                return AllocationType::Object;
-        }
-}
-
-// Keeps track of the memory allocated and freed.
-template<AllocationType at>
-static MallocHashMap<void*, MemoryAllocation>&
-get_mem_map()
-{
-        struct Mem // wrapper around std::unordered_map to check for memory leaks in
-                   // destructor
-        {
-                std::decay_t<decltype(get_mem_map<at>())> map; // return type
-
-                ~Mem() noexcept
-                {
-                        if (!map.empty()) { // If map isn't empty, we've leaked memory.
-                                for (auto const& p : map) {
-                                        auto const& memAlloc = p.second;
-                                        std::fprintf(stderr,
-                                                "-------------------------------------------------------"
-                                                "----------\n"
-                                                "Memory leak! %zu bytes. Memory was allocated in\n%s"
-                                                "-------------------------------------------------------"
-                                                "----------\n\n",
-                                                memAlloc.size,
-                                                to_string(memAlloc.stackTrace).c_str());
-                                }
-                        }
-                }
-        };
-
-        static Mem mem;
-        return mem.map;
-}
 
 // test if the memory was allocated with new or new[]
 template<AllocationType at>
@@ -110,6 +27,12 @@ allocatedAs(void* const ptr)
         auto& memmap = get_mem_map<at>();
         auto const it = memmap.find(ptr);
         return it != memmap.end();
+}
+
+MallocStackTrace
+new_delete_stack_trace()
+{
+        return MallocStackTrace{ 4, 100 };
 }
 
 template<AllocationType at>
@@ -125,7 +48,7 @@ new_base(std::size_t const count)
 
         mem_map.emplace(std::piecewise_construct,
                 std::forward_as_tuple(p),
-                std::forward_as_tuple(p, count, MallocStackTrace{ 3, 100 }));
+                std::forward_as_tuple(p, count, new_delete_stack_trace()));
         return p;
 }
 
@@ -156,7 +79,7 @@ delete_base(void* const ptr) noexcept
                                 stderr,
                                 "%s\n---------------------------------------------------------"
                                 "--------\n\n",
-                                to_string(MallocStackTrace{ 3, 100 }).c_str());
+                                to_string(new_delete_stack_trace()).c_str());
 
                         std::_Exit(-1); // If we've messed up, exit
                 }
