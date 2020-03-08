@@ -12,12 +12,71 @@
   * educational and possibly debugging purposes:
   */
 
-
-
+#include <boost/stacktrace.hpp> // boost::stacktrace
+#include <cstdio>               // fprintf
+#include <type_traits>          // decay
+#include <utility>              // move
 
 #include "MemoryAnalysis.h"
 
+  // returns AllocationType::Object for AllocationType::Array and
+  // AllocationType::Array for AllocationType::Object
+static constexpr AllocationType
+otherAllocType(AllocationType const at) noexcept
+{
+        return (at == AllocationType::Object) ? AllocationType::Array
+                : AllocationType::Object;
+}
 
+// Stack trace that uses malloc to avoid infinite recursion in operator new
+using MallocStackTrace = boost::stacktrace::basic_stacktrace<
+        MallocAllocator<boost::stacktrace::frame>>;
+
+// Memory allocation info with, address, size, stackTrace
+struct MemoryAllocation
+{
+        // the constructor is so that we can use emplace in unordered_map
+        MemoryAllocation(void const* const address_,
+                std::size_t const size_,
+                MallocStackTrace trace_) noexcept
+                : address{ address_ }
+                , size{ size_ }
+                , stackTrace{ std::move(trace_) }
+        {}
+        void const* address;
+        std::size_t size;
+        MallocStackTrace stackTrace;
+};
+
+// Keeps track of the memory allocated and freed.
+template<AllocationType at>
+MallocHashMap<void*, MemoryAllocation>&
+get_mem_map()
+{
+        struct Mem // wrapper around std::unordered_map to check for memory leaks in
+                   // destructor
+        {
+                typename std::decay<decltype(get_mem_map<at>())>::type map; // return type
+
+                ~Mem() noexcept
+                {
+                        for (auto const& p : map) {
+                                auto const& memAlloc = p.second;
+                                std::fprintf(stderr,
+                                        "-------------------------------------------------------"
+                                        "----------\n"
+                                        "Memory leak! %zu bytes. Memory was allocated in\n%s"
+                                        "-------------------------------------------------------"
+                                        "----------\n\n",
+                                        memAlloc.size,
+                                        to_string(memAlloc.stackTrace).c_str());
+                        }
+                }
+        };
+
+        static Mem mem;
+        return mem.map;
+}
 
 // test if the memory was allocated with new or new[]
 template<AllocationType at>
@@ -29,7 +88,7 @@ allocatedAs(void* const ptr)
         return it != memmap.end();
 }
 
-MallocStackTrace
+static MallocStackTrace
 new_delete_stack_trace()
 {
         return MallocStackTrace{ 4, 100 };
@@ -111,4 +170,10 @@ void
 operator delete[](void* const ptr) noexcept
 {
         delete_base<AllocationType::Array>(ptr);
+}
+
+MemInitializer::MemInitializer()
+{
+        operator delete(operator new(0)); // initialize memory maps
+        operator delete[](operator new[](0));
 }
